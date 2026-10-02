@@ -165,7 +165,14 @@ CREATE TABLE IF NOT EXISTS response_scenario_runs (
     scenario_id TEXT NOT NULL REFERENCES response_scenarios(scenario_id),
     as_of_date TEXT NOT NULL,
     input_sha256 TEXT NOT NULL,
+    input_json TEXT NOT NULL DEFAULT '{}',
     result_json TEXT NOT NULL,
+    adopted_risk_record_id INTEGER REFERENCES risk_index_risk_records(risk_record_id),
+    adopted_metric_series TEXT NOT NULL DEFAULT '',
+    adopted_source_revision TEXT NOT NULL DEFAULT '',
+    adopted_duty_date TEXT NOT NULL DEFAULT '',
+    adopted_observed_at TEXT NOT NULL DEFAULT '',
+    adopted_index_value TEXT NOT NULL DEFAULT '',
     created_by TEXT NOT NULL REFERENCES traffic_users(user_id),
     created_at TEXT NOT NULL,
     UNIQUE(scenario_id, as_of_date, input_sha256)
@@ -207,8 +214,29 @@ def connect(path: str | Path) -> sqlite3.Connection:
     return connection
 
 
+def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+_RUN_ADDED_COLUMNS = (
+    ("input_json", "TEXT NOT NULL DEFAULT '{}'"),
+    ("adopted_risk_record_id", "INTEGER"),
+    ("adopted_metric_series", "TEXT NOT NULL DEFAULT ''"),
+    ("adopted_source_revision", "TEXT NOT NULL DEFAULT ''"),
+    ("adopted_duty_date", "TEXT NOT NULL DEFAULT ''"),
+    ("adopted_observed_at", "TEXT NOT NULL DEFAULT ''"),
+    ("adopted_index_value", "TEXT NOT NULL DEFAULT ''"),
+)
+
+
 def initialize(connection: sqlite3.Connection) -> None:
     connection.executescript(SCHEMA)
+    existing = _columns(connection, "response_scenario_runs")
+    for name, declaration in _RUN_ADDED_COLUMNS:
+        if name not in existing:
+            connection.execute(
+                f"ALTER TABLE response_scenario_runs ADD COLUMN {name} {declaration}"
+            )
 
 
 @contextmanager

@@ -27,10 +27,11 @@ def run(workspace: Path) -> dict[str, object]:
     service.submit_dispatch("dispatch", {"dispatch_id": "nom-001", "corridor_id": "transfer-east-1", "specimen_event_id": "herbarium-room-east", "duty_date": "2026-09-25", "requested_units": "80000", "priority": 10, "idempotency_key": "nom-key-001"})
     allocation = service.allocate("dispatch", "transfer-east-1", "2026-09-25")
     deployment = service.dispatch_deployment("dispatch", "deployment-001", "nom-001", "lot-001", 2)
-    service.create_scenario("plan", {"scenario_id": "storage-recovery", "name": "主干路恢复通行与实验样本事件需求回落", "risk_index_drop_percent": "9", "route_capacity_changes": {"transfer-east-1": "20"}, "demand_changes": {"collection-east:preservation-box": "-5"}})
+    service.create_scenario("plan", {"scenario_id": "storage-recovery", "name": "主干路恢复通行与实验样本事件需求回落", "risk_index_drop_percent": "9", "route_capacity_changes": {"transfer-east-1": "20"}, "demand_changes": {"collection-east:preservation-box": "-5"}, "metric_binding": {"metric_series": "HUMIDITY", "source_revision": "rev-23", "effective_date": "2026-09-23"}})
     service.approve_scenario("risk", "storage-recovery", 1)
     scenario = service.run_scenario("plan", "storage-recovery", "2026-09-23")
-    result = {"status": "ok", "index": service.risk_summary("HUMIDITY"), "plan_id": allocation["plan_id"], "deployment": deployment, "scenario_run_id": scenario["run_id"], "audit": service.audit_chain("audit"), "workspace": workspace.name}
+    run_detail = service.get_scenario_run("audit", scenario["run_id"])
+    result = {"status": "ok", "index": service.risk_summary("HUMIDITY"), "plan_id": allocation["plan_id"], "deployment": deployment, "scenario_run_id": scenario["run_id"], "scenario_run": run_detail, "audit": service.audit_chain("audit"), "workspace": workspace.name}
     connection.close()
     return result
 

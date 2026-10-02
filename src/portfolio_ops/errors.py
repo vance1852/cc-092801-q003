@@ -26,6 +26,13 @@ class InvalidState(CollectionDispatchError):
     status = 409
 
 
+class MetricSeriesUnavailable(CollectionDispatchError):
+    """情景绑定的指标系列或来源版本在生效日期缺少登记证据。"""
+
+    code = "metric_series_unavailable"
+    status = 409
+
+
 class ValidationFailed(CollectionDispatchError):
     code = "validation_failed"
     status = 422

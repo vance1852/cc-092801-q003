@@ -223,12 +223,40 @@ class DispatchRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class MetricBinding:
+    """情景显式绑定的指标系列、来源版本与生效日期。"""
+
+    metric_series: str
+    source_revision: str
+    effective_date: str
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> "MetricBinding":
+        metric_series = required_text(raw.get("metric_series"), "metric_series", 16).upper()
+        if metric_series not in RISK_INDEXES - {"CUSTOM"}:
+            raise ValidationFailed("metric_series 必须是 HUMIDITY、INJURY、CONGESTION、HAZMAT 或 SECONDARY")
+        return cls(
+            metric_series=metric_series,
+            source_revision=identifier(raw.get("source_revision"), "source_revision"),
+            effective_date=date_text(raw.get("effective_date"), "effective_date"),
+        )
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "metric_series": self.metric_series,
+            "source_revision": self.source_revision,
+            "effective_date": self.effective_date,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ResponseScenario:
     scenario_id: str
     name: str
     risk_index_drop_percent: Decimal
     route_capacity_changes: Mapping[str, Decimal]
     demand_changes: Mapping[str, Decimal]
+    metric_binding: MetricBinding
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "ResponseScenario":
@@ -236,6 +264,9 @@ class ResponseScenario:
         demand_changes = raw.get("demand_changes", {})
         if not isinstance(route_changes, Mapping) or not isinstance(demand_changes, Mapping):
             raise ValidationFailed("情景变化必须是对象")
+        binding_raw = raw.get("metric_binding")
+        if not isinstance(binding_raw, Mapping):
+            raise ValidationFailed("metric_binding 必须是对象，且必须显式指定 metric_series、source_revision、effective_date")
         parsed_road_corridors = {
             identifier(key, "route_capacity_changes 键"): decimal_value(
                 value, f"route_capacity_changes.{key}", minimum=Decimal("-100"), maximum=Decimal("500")
@@ -259,4 +290,5 @@ class ResponseScenario:
             ),
             route_capacity_changes=parsed_road_corridors,
             demand_changes=parsed_demand,
+            metric_binding=MetricBinding.from_dict(binding_raw),
         )
