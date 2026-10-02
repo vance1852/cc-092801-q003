@@ -10,6 +10,7 @@ from typing import Any, Mapping
 
 from .clock import parse_utc
 from .errors import ValidationFailed
+from .planning import decimal_text
 
 
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{1,63}$")
@@ -223,12 +224,38 @@ class DispatchRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class ScenarioRiskBinding:
+    """情景运行时实际采用的风险指数系列、来源版本与生效日期。"""
+
+    risk_index: str
+    source_revision: str
+    duty_date: str
+
+    @classmethod
+    def from_dict(cls, raw: Any) -> "ScenarioRiskBinding":
+        if not isinstance(raw, Mapping):
+            raise ValidationFailed("risk_binding 必须是对象")
+        risk_index = required_text(raw.get("risk_index"), "risk_binding.risk_index", 16).upper()
+        if risk_index not in RISK_INDEXES - {"CUSTOM"}:
+            raise ValidationFailed("risk_binding.risk_index 必须是 HUMIDITY、INJURY、CONGESTION、HAZMAT 或 SECONDARY")
+        return cls(
+            risk_index=risk_index,
+            source_revision=identifier(raw.get("source_revision"), "risk_binding.source_revision"),
+            duty_date=date_text(raw.get("duty_date"), "risk_binding.duty_date"),
+        )
+
+    def as_dict(self) -> dict[str, object]:
+        return {"risk_index": self.risk_index, "source_revision": self.source_revision, "duty_date": self.duty_date}
+
+
+@dataclass(frozen=True, slots=True)
 class ResponseScenario:
     scenario_id: str
     name: str
     risk_index_drop_percent: Decimal
     route_capacity_changes: Mapping[str, Decimal]
     demand_changes: Mapping[str, Decimal]
+    risk_binding: ScenarioRiskBinding | None
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "ResponseScenario":
@@ -248,6 +275,10 @@ class ResponseScenario:
             )
             for key, value in demand_changes.items()
         }
+        risk_binding_raw = raw.get("risk_binding")
+        if risk_binding_raw is None:
+            raise ValidationFailed("情景必须通过 risk_binding 明确绑定风险指数系列、来源版本与生效日期")
+        risk_binding = ScenarioRiskBinding.from_dict(risk_binding_raw)
         return cls(
             scenario_id=identifier(raw.get("scenario_id"), "scenario_id"),
             name=required_text(raw.get("name"), "name"),
@@ -259,4 +290,18 @@ class ResponseScenario:
             ),
             route_capacity_changes=parsed_road_corridors,
             demand_changes=parsed_demand,
+            risk_binding=risk_binding,
         )
+
+    def normalized_definition(self) -> dict[str, Any]:
+        """批准时使用的规范化情景定义，字段顺序不影响内容哈希。"""
+        definition: dict[str, Any] = {
+            "scenario_id": self.scenario_id,
+            "name": self.name,
+            "risk_index_drop_percent": decimal_text(self.risk_index_drop_percent),
+            "route_capacity_changes": {key: decimal_text(value) for key, value in self.route_capacity_changes.items()},
+            "demand_changes": {key: decimal_text(value) for key, value in self.demand_changes.items()},
+        }
+        if self.risk_binding is not None:
+            definition["risk_binding"] = self.risk_binding.as_dict()
+        return definition

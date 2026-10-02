@@ -29,3 +29,10 @@ class InvalidState(CollectionDispatchError):
 class ValidationFailed(CollectionDispatchError):
     code = "validation_failed"
     status = 422
+
+
+class BusinessRuleViolation(CollectionDispatchError):
+    """请求格式正确，但业务证据（如情景绑定的指标系列/版本/日期）不满足运行条件。"""
+
+    code = "business_rule_violated"
+    status = 422

@@ -165,6 +165,7 @@ CREATE TABLE IF NOT EXISTS response_scenario_runs (
     scenario_id TEXT NOT NULL REFERENCES response_scenarios(scenario_id),
     as_of_date TEXT NOT NULL,
     input_sha256 TEXT NOT NULL,
+    input_snapshot_json TEXT NOT NULL DEFAULT '{}',
     result_json TEXT NOT NULL,
     created_by TEXT NOT NULL REFERENCES traffic_users(user_id),
     created_at TEXT NOT NULL,
@@ -209,6 +210,18 @@ def connect(path: str | Path) -> sqlite3.Connection:
 
 def initialize(connection: sqlite3.Connection) -> None:
     connection.executescript(SCHEMA)
+    _migrate(connection)
+
+
+def _migrate(connection: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(response_scenario_runs)").fetchall()
+    }
+    if "input_snapshot_json" not in columns:
+        connection.execute(
+            "ALTER TABLE response_scenario_runs ADD COLUMN input_snapshot_json TEXT NOT NULL DEFAULT '{}'"
+        )
 
 
 @contextmanager

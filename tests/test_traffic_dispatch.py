@@ -8,7 +8,7 @@ from decimal import Decimal
 
 from portfolio_ops.api import JsonApplication
 from portfolio_ops.clock import FrozenClock
-from portfolio_ops.errors import Conflict, Forbidden
+from portfolio_ops.errors import BusinessRuleViolation, Conflict, Forbidden, ValidationFailed
 from portfolio_ops.planning import AllocationRequest, RiskPoint, allocate_capacity, latest_streak
 from portfolio_ops.service import CollectionLogisticsService
 from portfolio_ops.risk import DemandBucket, inventory_coverage, mark_to_risk, traffic_gap
@@ -108,7 +108,7 @@ class CollectionLogisticsServiceTests(unittest.TestCase):
     def test_scenario_is_approved_and_replayed_by_input(self) -> None:
         self.risk_record(23, "98")
         self.service.add_inventory_lot("dispatch", {"preservation_resource_lot_id": "lot-1", "center_id": "collection-east", "preservation_resource_kind": "preservation-box", "grade": "HUMIDITY", "quantity_units": "60000", "unit_cost_cny": "91", "received_at": "2026-09-24T06:00:00Z"})
-        self.service.create_scenario("plan", {"scenario_id": "restart", "name": "库房环境恢复", "risk_index_drop_percent": "9", "route_capacity_changes": {"transfer-east-1": "20"}, "demand_changes": {"collection-east:preservation-box": "-5"}})
+        self.service.create_scenario("plan", {"scenario_id": "restart", "name": "库房环境恢复", "risk_index_drop_percent": "9", "route_capacity_changes": {"transfer-east-1": "20"}, "demand_changes": {"collection-east:preservation-box": "-5"}, "risk_binding": {"risk_index": "HUMIDITY", "source_revision": "r-23", "duty_date": "2026-09-23"}})
         with self.assertRaises(Forbidden):
             self.service.approve_scenario("plan", "restart", 1)
         self.service.approve_scenario("risk", "restart", 1)
@@ -117,6 +117,60 @@ class CollectionLogisticsServiceTests(unittest.TestCase):
         self.assertFalse(first["replayed"])
         self.assertTrue(second["replayed"])
         self.assertEqual(first["run_id"], second["run_id"])
+        self.assertEqual(first["metric_adopted"], {
+            "risk_index": "HUMIDITY",
+            "risk_record_id": 1,
+            "duty_date": "2026-09-23",
+            "index_value": "98",
+            "source_revision": "r-23",
+            "observed_at": "2026-09-23T21:00:00Z",
+        })
+
+    def test_scenario_requires_explicit_binding(self) -> None:
+        self.risk_record(23, "98")
+        with self.assertRaisesRegex(ValidationFailed, "risk_binding"):
+            self.service.create_scenario("plan", {"scenario_id": "no-bind", "name": "未绑定指标", "risk_index_drop_percent": "9"})
+
+    def test_run_fails_when_bound_series_missing_rather_than_guessing(self) -> None:
+        # 同一天登记了两个不同指标系列：拥挤指数 HUMIDITY 与差异化评分 CONGESTION，
+        # 后登记的差异化评分曾被“当天最后一条”逻辑错误代入。
+        self.risk_record(23, "98")
+        self.service.record_risk_record("plan", {"risk_index": "CONGESTION", "duty_date": "2026-09-23", "index_value": "31.5", "source_revision": "diff-23-v1", "observed_at": "2026-09-23T22:30:00Z"})
+        self.service.create_scenario("plan", {"scenario_id": "crowded-target", "name": "全球权益拥挤度", "risk_index_drop_percent": "9", "risk_binding": {"risk_index": "HAZMAT", "source_revision": "r-23", "duty_date": "2026-09-23"}})
+        self.service.approve_scenario("risk", "crowded-target", 1)
+        with self.assertRaisesRegex(BusinessRuleViolation, "HAZMAT"):
+            self.service.run_scenario("plan", "crowded-target", "2026-09-23")
+        # 系列存在但版本不存在同样报业务错误，不回退到当日其他版本。
+        self.service.create_scenario("plan", {"scenario_id": "crowded-version", "name": "全球权益拥挤度版本", "risk_index_drop_percent": "9", "risk_binding": {"risk_index": "HUMIDITY", "source_revision": "r-99", "duty_date": "2026-09-23"}})
+        self.service.approve_scenario("risk", "crowded-version", 1)
+        with self.assertRaisesRegex(BusinessRuleViolation, "r-99"):
+            self.service.run_scenario("plan", "crowded-version", "2026-09-23")
+
+    def test_historical_run_replays_from_snapshot_despite_later_revisions(self) -> None:
+        self.risk_record(23, "98")
+        self.service.add_inventory_lot("dispatch", {"preservation_resource_lot_id": "lot-1", "center_id": "collection-east", "preservation_resource_kind": "preservation-box", "grade": "HUMIDITY", "quantity_units": "60000", "unit_cost_cny": "91", "received_at": "2026-09-24T06:00:00Z"})
+        self.service.create_scenario("plan", {"scenario_id": "snap", "name": "快照重放", "risk_index_drop_percent": "9", "route_capacity_changes": {"transfer-east-1": "20"}, "demand_changes": {"collection-east:preservation-box": "-5"}, "risk_binding": {"risk_index": "HUMIDITY", "source_revision": "r-23", "duty_date": "2026-09-23"}})
+        self.service.approve_scenario("risk", "snap", 1)
+        first = self.service.run_scenario("plan", "snap", "2026-09-23")
+        first_projected = first["projected_risk_index_cny"]
+        # 同日补登记一个“更晚”的新版本——旧逻辑会把最后一条当作输入。
+        self.service.record_risk_record("plan", {"risk_index": "HUMIDITY", "duty_date": "2026-09-23", "index_value": "70", "source_revision": "r-23-corrected", "observed_at": "2026-09-23T23:30:00Z"})
+        detail = self.service.scenario_run("plan", first["run_id"])
+        self.assertEqual(detail["metric_adopted"]["source_revision"], "r-23")
+        self.assertEqual(detail["metric_adopted"]["index_value"], "98")
+        replayed = self.service.replay_scenario_run("plan", first["run_id"])
+        self.assertTrue(replayed["replayed"])
+        self.assertEqual(replayed["projected_risk_index_cny"], first_projected)
+        self.assertEqual(replayed["metric_adopted"]["source_revision"], "r-23")
+        self.assertEqual(replayed["metric_adopted"]["observed_at"], "2026-09-23T21:00:00Z")
+        # 新证据应产生新的运行（绑定到新版本后），旧结论不漂移。
+        self.service.create_scenario("plan", {"scenario_id": "snap-2", "name": "快照重放修订", "risk_index_drop_percent": "9", "route_capacity_changes": {"transfer-east-1": "20"}, "demand_changes": {"collection-east:preservation-box": "-5"}, "risk_binding": {"risk_index": "HUMIDITY", "source_revision": "r-23-corrected", "duty_date": "2026-09-23"}})
+        self.service.approve_scenario("risk", "snap-2", 1)
+        revised = self.service.run_scenario("plan", "snap-2", "2026-09-23")
+        self.assertNotEqual(revised["run_id"], first["run_id"])
+        self.assertNotEqual(revised["projected_risk_index_cny"], first_projected)
+        again = self.service.replay_scenario_run("plan", first["run_id"])
+        self.assertEqual(again["projected_risk_index_cny"], first_projected)
 
     def test_audit_chain_detects_tampering(self) -> None:
         self.assertTrue(self.service.audit_chain("audit")["valid"])
